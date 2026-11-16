@@ -18,7 +18,7 @@ class AppDatabase {
     final path = join(await getDatabasesPath(), 'asep_beruang.db');
     _database = await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {
         await db.execute('''
@@ -27,7 +27,8 @@ class AppDatabase {
             name TEXT NOT NULL,
             balance INTEGER NOT NULL DEFAULT 0,
             icon TEXT NOT NULL DEFAULT 'account_balance_wallet',
-            is_active INTEGER NOT NULL DEFAULT 1
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
           )
         ''');
         await db.execute('''
@@ -112,6 +113,14 @@ class AppDatabase {
           });
         }
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+            'ALTER TABLE wallets ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute('UPDATE wallets SET sort_order = id');
+        }
+      },
     );
     return _database!;
   }
@@ -121,7 +130,7 @@ class AppDatabase {
     return db.query(
       'wallets',
       where: activeOnly ? 'is_active = 1' : null,
-      orderBy: 'id',
+      orderBy: 'sort_order, id',
     );
   }
 
@@ -284,9 +293,30 @@ class AppDatabase {
     final db = await database;
     final values = {'name': name.trim(), 'icon': icon};
     if (id == null) {
-      return db.insert('wallets', {...values, 'balance': initialBalance});
+      final maxOrder = Sqflite.firstIntValue(
+        await db.rawQuery('SELECT COALESCE(MAX(sort_order), -1) FROM wallets'),
+      )!;
+      return db.insert('wallets', {
+        ...values,
+        'balance': initialBalance,
+        'sort_order': maxOrder + 1,
+      });
     }
     return db.update('wallets', values, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> reorderWallets(List<int> walletIds) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      for (var index = 0; index < walletIds.length; index++) {
+        await txn.update(
+          'wallets',
+          {'sort_order': index},
+          where: 'id = ? AND is_active = 1',
+          whereArgs: [walletIds[index]],
+        );
+      }
+    });
   }
 
   Future<int> saveCategory({
@@ -439,6 +469,188 @@ class AppDatabase {
       'date': _dateKey(date),
       'status': 'no_expense_checked',
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  Future<void> updateEntry({
+    required int id,
+    required String type,
+    required int amount,
+    required DateTime date,
+    required int walletId,
+    int? targetWalletId,
+    int? categoryId,
+    String? note,
+    required bool allowNegative,
+  }) async {
+    _validateEntry(type, amount, walletId, targetWalletId, categoryId);
+    final db = await database;
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'transactions',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (existing.isEmpty) throw StateError('Transaksi tidak ditemukan.');
+      final old = existing.single;
+      await _reverseEntry(txn, old);
+
+      final sourceRows = await txn.query(
+        'wallets',
+        columns: ['balance'],
+        where: 'id = ?',
+        whereArgs: [walletId],
+        limit: 1,
+      );
+      if (sourceRows.isEmpty) throw StateError('Dompet sumber tidak tersedia.');
+      final sourceBalance = sourceRows.single['balance'] as int;
+      if ((type == 'expense' || type == 'transfer') &&
+          amount > sourceBalance &&
+          !allowNegative) {
+        throw StateError('Saldo dompet tidak mencukupi.');
+      }
+      if (type == 'transfer') {
+        final targets = await txn.query(
+          'wallets',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [targetWalletId],
+          limit: 1,
+        );
+        if (targets.isEmpty) throw StateError('Dompet tujuan tidak tersedia.');
+      }
+
+      await _applyEntry(
+        txn,
+        type: type,
+        amount: amount,
+        walletId: walletId,
+        targetWalletId: targetWalletId,
+      );
+      await txn.update(
+        'transactions',
+        {
+          'type': type,
+          'amount': amount,
+          'date': date.toIso8601String(),
+          'wallet_id': walletId,
+          'target_wallet_id': targetWalletId,
+          'category_id': categoryId,
+          'note': note?.trim().isEmpty == true ? null : note?.trim(),
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+
+      final oldDate = _dateKey(DateTime.parse(old['date'] as String));
+      final newDate = _dateKey(date);
+      await txn.insert('daily_logs', {
+        'date': newDate,
+        'status': 'transaction_recorded',
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      if (oldDate != newDate) await _refreshDailyLog(txn, oldDate);
+    });
+  }
+
+  Future<void> deleteEntry(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'transactions',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final row = rows.single;
+      await _reverseEntry(txn, row);
+      await txn.delete('transactions', where: 'id = ?', whereArgs: [id]);
+      await _refreshDailyLog(
+        txn,
+        _dateKey(DateTime.parse(row['date'] as String)),
+      );
+    });
+  }
+
+  void _validateEntry(
+    String type,
+    int amount,
+    int walletId,
+    int? targetWalletId,
+    int? categoryId,
+  ) {
+    if (amount <= 0) throw ArgumentError('Nominal harus lebih dari nol.');
+    if (type != 'expense' && type != 'income' && type != 'transfer') {
+      throw ArgumentError('Jenis transaksi tidak dikenal.');
+    }
+    if (type == 'transfer' &&
+        (targetWalletId == null || walletId == targetWalletId)) {
+      throw ArgumentError('Pilih dua dompet yang berbeda untuk transfer.');
+    }
+    if (type != 'transfer' && categoryId == null) {
+      throw ArgumentError('Kategori transaksi wajib dipilih.');
+    }
+  }
+
+  Future<void> _reverseEntry(
+    Transaction txn,
+    Map<String, Object?> row,
+  ) async {
+    final amount = row['amount'] as int;
+    final walletId = row['wallet_id'] as int;
+    final type = row['type'] as String;
+    if (type == 'income') {
+      await txn.rawUpdate('UPDATE wallets SET balance = balance - ? WHERE id = ?', [amount, walletId]);
+    } else {
+      await txn.rawUpdate('UPDATE wallets SET balance = balance + ? WHERE id = ?', [amount, walletId]);
+      if (type == 'transfer') {
+        await txn.rawUpdate(
+          'UPDATE wallets SET balance = balance - ? WHERE id = ?',
+          [amount, row['target_wallet_id']],
+        );
+      }
+    }
+  }
+
+  Future<void> _applyEntry(
+    Transaction txn, {
+    required String type,
+    required int amount,
+    required int walletId,
+    int? targetWalletId,
+  }) async {
+    if (type == 'income') {
+      await txn.rawUpdate('UPDATE wallets SET balance = balance + ? WHERE id = ?', [amount, walletId]);
+    } else {
+      await txn.rawUpdate('UPDATE wallets SET balance = balance - ? WHERE id = ?', [amount, walletId]);
+      if (type == 'transfer') {
+        await txn.rawUpdate(
+          'UPDATE wallets SET balance = balance + ? WHERE id = ?',
+          [amount, targetWalletId],
+        );
+      }
+    }
+  }
+
+  Future<void> _refreshDailyLog(Transaction txn, String date) async {
+    final remaining = Sqflite.firstIntValue(
+      await txn.rawQuery(
+        "SELECT COUNT(*) FROM transactions WHERE substr(date, 1, 10) = ?",
+        [date],
+      ),
+    )!;
+    if (remaining > 0) {
+      await txn.insert('daily_logs', {
+        'date': date,
+        'status': 'transaction_recorded',
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    } else {
+      await txn.delete(
+        'daily_logs',
+        where: "date = ? AND status = 'transaction_recorded'",
+        whereArgs: [date],
+      );
+    }
   }
 
   Future<int> streak() async {

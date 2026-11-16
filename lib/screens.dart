@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import 'app_state.dart';
 import 'models.dart';
 import 'utils.dart';
+import 'mascot.dart';
+import 'transaction_form.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.onOpenBudgets});
@@ -18,11 +20,11 @@ class DashboardScreen extends StatelessWidget {
           : state.summary.budgetSpent / state.summary.budgetLimit;
       final sleeping = state.summary.overBudgetCount > 0 || state.streak == 0;
       final cautious = ratio >= 0.75 && ratio < 1;
-      final face = sleeping
-          ? '😵‍💫'
+      final mood = sleeping
+          ? BearMood.sleepy
           : cautious
-          ? '🥵'
-          : '🐻';
+          ? BearMood.careful
+          : BearMood.happy;
       final message = sleeping
           ? state.summary.overBudgetCount > 0
                 ? 'Yuk, cek lagi anggaran yang terlewat.'
@@ -35,7 +37,7 @@ class DashboardScreen extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
           children: [
-            _MascotCard(face: face, message: message, streak: state.streak),
+            _MascotCard(mood: mood, message: message, streak: state.streak),
             const SizedBox(height: 16),
             _BalanceCard(
               balance: state.summary.totalBalance,
@@ -234,9 +236,11 @@ class WalletsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Consumer<AppState>(
-    builder: (context, state, _) => ListView(
-      padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
-      children: [
+    builder: (context, state, _) {
+      final wallets = state.activeWallets;
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
+        children: [
         _WalletTotalCard(
           balance: state.summary.totalBalance,
           walletCount: state.activeWallets.length,
@@ -258,35 +262,70 @@ class WalletsScreen extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 8),
-        ...state.activeWallets.map(
-          (wallet) => Card(
-            child: ListTile(
-              leading: _IconBubble(
-                icon: iconFromName(wallet.icon),
-                color: const Color(0xFF548860),
-              ),
-              title: Text(wallet.name),
-              subtitle: Text(formatRupiah(wallet.balance)),
-              trailing: PopupMenuButton<String>(
-                onSelected: (action) async {
-                  if (action == 'edit') {
-                    await showWalletEditor(context, wallet: wallet);
-                  } else {
-                    await _confirmDelete(
-                      context,
-                      title: 'Hapus dompet?',
-                      message: 'Dompet dengan riwayat transaksi akan dinonaktifkan agar catatan lama tetap utuh.',
-                      onDelete: () => state.deleteWallet(wallet.id),
-                    );
-                  }
-                },
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('Ubah nama')),
-                  PopupMenuItem(value: 'delete', child: Text('Hapus')),
-                ],
-              ),
+        if (wallets.length > 1)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Tekan dan tahan ikon seret untuk mengubah urutan.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF77766F)),
             ),
           ),
+        ReorderableListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          buildDefaultDragHandles: false,
+          itemCount: wallets.length,
+          onReorder: (oldIndex, newIndex) async {
+            final reordered = [...wallets];
+            if (newIndex > oldIndex) newIndex -= 1;
+            final wallet = reordered.removeAt(oldIndex);
+            reordered.insert(newIndex, wallet);
+            await state.reorderWallets(reordered);
+          },
+          itemBuilder: (context, index) {
+            final wallet = wallets[index];
+            return Card(
+              key: ValueKey(wallet.id),
+              child: ListTile(
+                leading: _IconBubble(
+                  icon: iconFromName(wallet.icon),
+                  color: const Color(0xFF548860),
+                ),
+                title: Text(wallet.name),
+                subtitle: Text(formatRupiah(wallet.balance)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    PopupMenuButton<String>(
+                      onSelected: (action) async {
+                        if (action == 'edit') {
+                          await showWalletEditor(context, wallet: wallet);
+                        } else {
+                          await _confirmDelete(
+                            context,
+                            title: 'Hapus dompet?',
+                            message: 'Dompet dengan riwayat transaksi akan dinonaktifkan agar catatan lama tetap utuh.',
+                            onDelete: () => state.deleteWallet(wallet.id),
+                          );
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'edit', child: Text('Ubah nama')),
+                        PopupMenuItem(value: 'delete', child: Text('Hapus')),
+                      ],
+                    ),
+                    ReorderableDragStartListener(
+                      index: index,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Icon(Icons.drag_handle_rounded, color: Color(0xFF77766F)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
         ),
         if (state.activeWallets.isEmpty)
           const _EmptyCard(
@@ -294,8 +333,9 @@ class WalletsScreen extends StatelessWidget {
             title: 'Belum ada dompet aktif',
             subtitle: 'Tambahkan dompet untuk mulai mencatat transaksi.',
           ),
-      ],
-    ),
+        ],
+      );
+    },
   );
 }
 
@@ -433,12 +473,12 @@ class _BadgeData {
 
 class _MascotCard extends StatelessWidget {
   const _MascotCard({
-    required this.face,
+    required this.mood,
     required this.message,
     required this.streak,
   });
 
-  final String face;
+  final BearMood mood;
   final String message;
   final int streak;
 
@@ -459,10 +499,10 @@ class _MascotCard extends StatelessWidget {
           duration: const Duration(milliseconds: 350),
           transitionBuilder: (child, animation) =>
               ScaleTransition(scale: animation, child: child),
-          child: Text(
-            face,
-            key: ValueKey(face),
-            style: const TextStyle(fontSize: 64),
+          child: BearMascot(
+            key: ValueKey(mood),
+            size: 76,
+            mood: mood,
           ),
         ),
         const SizedBox(width: 14),
@@ -930,7 +970,10 @@ class EntryTile extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 12),
         ),
-        trailing: Text(
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
           '${income
               ? '+'
               : transfer
@@ -941,6 +984,27 @@ class EntryTile extends StatelessWidget {
             fontWeight: FontWeight.w800,
             fontSize: 12,
           ),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'Kelola transaksi',
+              onSelected: (action) async {
+                if (action == 'edit') {
+                  await showEditEntry(context, entry);
+                } else {
+                  await _confirmDelete(
+                    context,
+                    title: 'Hapus transaksi?',
+                    message: 'Transaksi dihapus dan saldo dompet terkait diperbarui.',
+                    onDelete: () => context.read<AppState>().deleteEntry(entry.id),
+                  );
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'edit', child: Text('Ubah transaksi')),
+                PopupMenuItem(value: 'delete', child: Text('Hapus transaksi')),
+              ],
+            ),
+          ],
         ),
       ),
     );
@@ -982,8 +1046,9 @@ class _EmptyCard extends StatelessWidget {
       padding: const EdgeInsets.all(20),
       child: Column(
         children: [
-          Icon(icon, size: 34, color: const Color(0xFF75917A)),
+          const BearMascot(size: 70),
           const SizedBox(height: 8),
+          Icon(icon, size: 18, color: const Color(0xFF75917A)),
           Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
           const SizedBox(height: 4),
           Text(

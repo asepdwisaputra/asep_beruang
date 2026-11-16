@@ -5,6 +5,7 @@ import 'app_state.dart';
 import 'data/app_database.dart';
 import 'screens.dart';
 import 'transaction_form.dart';
+import 'mascot.dart';
 
 void main() {
   runApp(
@@ -81,15 +82,42 @@ class _AppBootstrapState extends State<AppBootstrap> {
           return _StartupError(message: state.loadError!);
         }
         if (!state.isReady) {
-          return const Scaffold(
-            body: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Menyiapkan dompet beruang...'),
-                ],
+          return Scaffold(
+            body: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xFFFFFCF6), Color(0xFFEAF2E3)],
+                ),
+              ),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Container(
+                    width: 340,
+                    padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 32),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(30),
+                      boxShadow: const [BoxShadow(color: Color(0x1A315D43), blurRadius: 28, offset: Offset(0, 12))],
+                    ),
+                    child: const Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        BearMascot(size: 112),
+                        SizedBox(height: 14),
+                        Text('Asep Beruang', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w900, color: Color(0xFF315D43))),
+                        SizedBox(height: 6),
+                        Text('Teman baik dompetmu', style: TextStyle(color: Color(0xFF77766F))),
+                        SizedBox(height: 24),
+                        SizedBox(width: 150, child: LinearProgressIndicator(minHeight: 6, borderRadius: BorderRadius.all(Radius.circular(9)))),
+                        SizedBox(height: 12),
+                        Text('Menyiapkan catatan keuangan...', style: TextStyle(fontSize: 12, color: Color(0xFF77766F))),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
           );

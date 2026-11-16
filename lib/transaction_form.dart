@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'app_state.dart';
+import 'models.dart';
 import 'utils.dart';
 
 Future<void> showQuickActions(BuildContext context) async {
@@ -17,6 +18,15 @@ Future<void> showQuickActions(BuildContext context) async {
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => TransactionForm(type: type),
+  );
+}
+
+Future<void> showEditEntry(BuildContext context, LedgerEntry entry) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => TransactionForm(type: entry.type, entry: entry),
   );
 }
 
@@ -93,9 +103,10 @@ class _QuickActionSheet extends StatelessWidget {
 }
 
 class TransactionForm extends StatefulWidget {
-  const TransactionForm({super.key, required this.type});
+  const TransactionForm({super.key, required this.type, this.entry});
 
   final String type;
+  final LedgerEntry? entry;
 
   @override
   State<TransactionForm> createState() => _TransactionFormState();
@@ -113,15 +124,25 @@ class _TransactionFormState extends State<TransactionForm> {
   bool get _isTransfer => widget.type == 'transfer';
   bool get _isOutflow => widget.type == 'expense' || _isTransfer;
   String get _title => switch (widget.type) {
-    'income' => 'Catat pemasukan',
-    'transfer' => 'Transfer antar dompet',
-    _ => 'Catat pengeluaran',
+    'income' => widget.entry == null ? 'Catat pemasukan' : 'Ubah pemasukan',
+    'transfer' => widget.entry == null ? 'Transfer antar dompet' : 'Ubah transfer',
+    _ => widget.entry == null ? 'Catat pengeluaran' : 'Ubah pengeluaran',
   };
 
   @override
   void initState() {
     super.initState();
     final state = context.read<AppState>();
+    final entry = widget.entry;
+    if (entry != null) {
+      _amountController.text = entry.amount.toString();
+      _noteController.text = entry.note ?? '';
+      _date = entry.date;
+      _walletId = entry.walletId;
+      _targetWalletId = entry.targetWalletId;
+      _categoryId = entry.categoryId;
+      return;
+    }
     final wallets = state.activeWallets;
     _walletId = wallets.isEmpty ? null : wallets.first.id;
     final otherWallets = wallets.where((wallet) => wallet.id != _walletId);
@@ -142,10 +163,23 @@ class _TransactionFormState extends State<TransactionForm> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final wallets = state.activeWallets;
-    final categories = widget.type == 'income'
+    final wallets = [...state.activeWallets];
+    if (widget.entry != null) {
+      for (final id in [widget.entry!.walletId, widget.entry!.targetWalletId]) {
+        final oldWallets = state.wallets.where((wallet) => wallet.id == id);
+        if (oldWallets.isNotEmpty && wallets.every((wallet) => wallet.id != id)) {
+          wallets.add(oldWallets.first);
+        }
+      }
+    }
+    final categories = [...(widget.type == 'income'
         ? state.activeIncomeCategories
-        : state.activeExpenseCategories;
+        : state.activeExpenseCategories)];
+    final categoryId = widget.entry?.categoryId;
+    if (categoryId != null && categories.every((item) => item.id != categoryId)) {
+      final oldCategories = state.categories.where((item) => item.id == categoryId);
+      if (oldCategories.isNotEmpty) categories.add(oldCategories.first);
+    }
 
     return SafeArea(
       top: false,
@@ -301,7 +335,7 @@ class _TransactionFormState extends State<TransactionForm> {
                             width: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Simpan transaksi'),
+                        : Text(widget.entry == null ? 'Simpan transaksi' : 'Simpan perubahan'),
                   ),
                 ),
               ),
@@ -345,10 +379,22 @@ class _TransactionFormState extends State<TransactionForm> {
 
     var allowNegative = false;
     if (_isOutflow) {
-      final source = state.activeWallets.firstWhere(
+      final source = state.wallets.firstWhere(
         (wallet) => wallet.id == _walletId,
       );
-      if (amount > source.balance) {
+      var availableBalance = source.balance;
+      final oldEntry = widget.entry;
+      if (oldEntry != null) {
+        if (oldEntry.type == 'income' && oldEntry.walletId == _walletId) {
+          availableBalance -= oldEntry.amount;
+        } else if (oldEntry.type != 'income' && oldEntry.walletId == _walletId) {
+          availableBalance += oldEntry.amount;
+        }
+        if (oldEntry.type == 'transfer' && oldEntry.targetWalletId == _walletId) {
+          availableBalance -= oldEntry.amount;
+        }
+      }
+      if (amount > availableBalance) {
         final proceed = await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
@@ -375,20 +421,37 @@ class _TransactionFormState extends State<TransactionForm> {
 
     setState(() => _saving = true);
     try {
-      await state.addEntry(
-        type: widget.type,
-        amount: amount,
-        date: DateTime(_date.year, _date.month, _date.day, 12),
-        walletId: _walletId!,
-        targetWalletId: _isTransfer ? _targetWalletId : null,
-        categoryId: _isTransfer ? null : _categoryId,
-        note: _noteController.text,
-        allowNegative: allowNegative,
-      );
+      final date = DateTime(_date.year, _date.month, _date.day, 12);
+      final targetWalletId = _isTransfer ? _targetWalletId : null;
+      final categoryId = _isTransfer ? null : _categoryId;
+      if (widget.entry case final entry?) {
+        await state.updateEntry(
+          id: entry.id,
+          type: widget.type,
+          amount: amount,
+          date: date,
+          walletId: _walletId!,
+          targetWalletId: targetWalletId,
+          categoryId: categoryId,
+          note: _noteController.text,
+          allowNegative: allowNegative,
+        );
+      } else {
+        await state.addEntry(
+          type: widget.type,
+          amount: amount,
+          date: date,
+          walletId: _walletId!,
+          targetWalletId: targetWalletId,
+          categoryId: categoryId,
+          note: _noteController.text,
+          allowNegative: allowNegative,
+        );
+      }
       if (!mounted) return;
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Transaksi berhasil disimpan.')),
+        SnackBar(content: Text(widget.entry == null ? 'Transaksi berhasil disimpan.' : 'Perubahan transaksi tersimpan.')),
       );
     } catch (error) {
       if (mounted) {

@@ -151,6 +151,36 @@ class AppState extends ChangeNotifier {
     await refresh();
   }
 
+  Future<void> updateEntry({
+    required int id,
+    required String type,
+    required int amount,
+    required DateTime date,
+    required int walletId,
+    int? targetWalletId,
+    int? categoryId,
+    String? note,
+    required bool allowNegative,
+  }) async {
+    await _database.updateEntry(
+      id: id,
+      type: type,
+      amount: amount,
+      date: date,
+      walletId: walletId,
+      targetWalletId: targetWalletId,
+      categoryId: categoryId,
+      note: note,
+      allowNegative: allowNegative,
+    );
+    await refresh();
+  }
+
+  Future<void> deleteEntry(int id) async {
+    await _database.deleteEntry(id);
+    await refresh();
+  }
+
   Future<void> markNoExpenseToday() async {
     await _database.markNoExpense(DateTime.now());
     await refresh();
@@ -173,6 +203,11 @@ class AppState extends ChangeNotifier {
 
   Future<void> deleteWallet(int id) async {
     await _database.deleteWallet(id);
+    await refresh();
+  }
+
+  Future<void> reorderWallets(List<Wallet> reordered) async {
+    await _database.reorderWallets(reordered.map((wallet) => wallet.id).toList());
     await refresh();
   }
 
